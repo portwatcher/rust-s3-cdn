@@ -11,7 +11,7 @@ This project can save your money by two means:
 
 ## caveats
 
-Please note that this project does not process authentication, it is intended to be used behind a gateway where authentication is done.
+Please note that this project does not process authentication, it is intended to be used behind a gateway where authentication is done first.
 
 Authentication is specific to your business and beyond the scope of this project.
 
