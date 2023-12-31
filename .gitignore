@@ -1,0 +1,4 @@
+/target
+cached_files/*
+secret.rs
+.env
