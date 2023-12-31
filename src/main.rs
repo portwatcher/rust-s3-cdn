@@ -8,7 +8,6 @@ use aws_sdk_s3::Client;
 use dotenv::dotenv;
 use lru::LruCache;
 use rocket::{get, http::ContentType, http::Status, main, routes, State};
-use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -90,7 +89,12 @@ async fn main() -> Result<(), rocket::Error> {
     let config = aws_config::load_from_env().await;
     let s3_client = Client::new(&config);
 
-    let cache_capacity = NonZeroUsize::new(1000).expect("Cache capacity must be non-zero");
+    let cache_capacity_string = dotenv::var("CACHE_CAPACITY").unwrap_or(1000.to_string());
+    let cache_capacity = cache_capacity_string
+        .parse::<usize>()
+        .expect("Invalid CACHE_CAPACITY value")
+        .try_into()
+        .expect("Cache capacity must be non-zero");
 
     let state = Arc::new(AppState {
         cache: Mutex::new(LruCache::new(cache_capacity)),
