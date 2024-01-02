@@ -1,6 +1,3 @@
-mod fs;
-mod s3;
-
 use crate::fs::{generate_file_path, save_stream_to_disk};
 use crate::s3::get_file_from_s3;
 
@@ -11,6 +8,9 @@ use rocket::{get, http::ContentType, http::Status, main, routes, State};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+
+mod fs;
+mod s3;
 
 struct AppState {
     cache: Mutex<LruCache<String, (PathBuf, ContentType)>>,

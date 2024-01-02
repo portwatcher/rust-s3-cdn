@@ -1787,7 +1787,6 @@ dependencies = [
  "dotenv",
  "lru",
  "rocket",
- "serde",
  "tokio",
 ]
 

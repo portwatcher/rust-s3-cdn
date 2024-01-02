@@ -2,3 +2,5 @@
 cached_files/*
 secret.rs
 .env
+build.sh
+build-local.sh
