@@ -5,6 +5,7 @@ use aws_sdk_s3::Client;
 use dotenv::dotenv;
 use lru::LruCache;
 use rocket::{get, http::ContentType, http::Status, main, routes, State};
+use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -59,7 +60,7 @@ async fn index(
         }
     }
 
-    let bucket = dotenv::var("S3_BUCKET_NAME").expect("S3_BUCKET_NAME must be set");
+    let bucket = env::var("S3_BUCKET_NAME").expect("S3_BUCKET_NAME must be set");
     match get_file_from_s3(&app_state.s3_client, &bucket, &s3key).await {
         Ok((byte_stream, content_type)) => {
             let file_path = generate_file_path(&s3key);
