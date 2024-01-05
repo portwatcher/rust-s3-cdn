@@ -7,7 +7,7 @@ A simple LRU cached proxy for AWS S3 written in Rust
 This project can save your money by two means:
 
 - This project can reduce the requests and traffic to s3 comparing to returning signed url directly to the clients.
-- This project can increase fetch speed when you deploy it near to users while getting rid of cloudfront
+- This project can increase fetch speed when you deploy it near to users while getting rid of cloudfront fees
 
 ## caveats
 
