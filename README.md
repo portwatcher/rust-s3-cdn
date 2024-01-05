@@ -29,4 +29,8 @@ CACHE_CAPACITY=1000
 
 ## Todo
 
-dockerize
+- ~~dockerize~~
+- invalidate interface
+- restore lru object from files already cached
+- a background worker that auto removes files according to configured timeout
+- use stream
