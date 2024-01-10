@@ -13,3 +13,4 @@ aws-sdk-s3 = "1.11.0"
 tokio = { version = "1", features = ["full"] }
 lru = "0.12.1"
 anyhow = "1.0.78"
+infer = "0.15.0"

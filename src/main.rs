@@ -1,4 +1,4 @@
-use crate::fs::{generate_file_path, save_stream_to_disk};
+use crate::fs::{generate_file_path, save_stream_to_disk, determine_content_type, generate_key_from_filename};
 use crate::s3::get_file_from_s3;
 
 use aws_sdk_s3::Client;
@@ -6,7 +6,7 @@ use dotenv::dotenv;
 use lru::LruCache;
 use rocket::{get, http::ContentType, http::Status, main, routes, State};
 use std::env;
-use std::path::PathBuf;
+use std::path::{PathBuf, Path};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -36,6 +36,29 @@ impl AppState {
         cache.put(key, (file_path, content_type));
         Ok(())
     }
+
+    async fn rebuild_cache_from_disk(&self) -> Result<(), anyhow::Error> {
+        let dir = env::var("CACHE_DIR").expect("CACHE_DIR must be set");
+        let cache_dir = Path::new(&dir);
+        let mut cache = self.cache.lock().await;
+        let mut paths = tokio::fs::read_dir(cache_dir).await?;
+
+        let mut count = 0;
+        while let Some(entry) = paths.next_entry().await? {
+            let path = entry.path();
+            if path.is_file() {
+                let filename = path.file_name().unwrap().to_str().unwrap().to_owned();
+                let content_type = determine_content_type(&path);
+                let key = generate_key_from_filename(&filename);
+                cache.put(key, (path, content_type));
+                count += 1;
+            }
+        }
+
+        println!("rebuild lru cache done, cached {} files", count);
+
+        Ok(())
+    }
 }
 
 #[get("/<path..>")]
@@ -55,6 +78,9 @@ async fn index(
         let mut cache = app_state.cache.lock().await;
         if let Some((file_path, content_type)) = cache.get(&s3key) {
             if let Ok(data) = tokio::fs::read(&file_path).await {
+                if cfg!(debug_assertions) {
+                    println!("served {} from cache", &s3key);
+                }
                 return Ok((content_type.clone(), data));
             }
         }
@@ -77,6 +103,9 @@ async fn index(
                 .await
                 .expect("add to cache failed");
             let data = std::fs::read(&file_path).expect("Failed to read file");
+            if cfg!(debug_assertions) {
+                println!("served {} from s3", &s3key);
+            }
             Ok((content_type, data))
         }
         Err(_) => Err(Status::NotFound),
@@ -101,6 +130,8 @@ async fn main() -> Result<(), rocket::Error> {
         cache: Mutex::new(LruCache::new(cache_capacity)),
         s3_client,
     });
+
+    state.rebuild_cache_from_disk().await.expect("rebuild cache failed");
 
     let _rocket = rocket::build()
         .manage(state)
