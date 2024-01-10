@@ -44,6 +44,11 @@ pub fn determine_content_type(path: &Path) -> ContentType {
         match kind.mime_type() {
             "image/jpeg" => ContentType::JPEG,
             "image/png" => ContentType::PNG,
+            "image/webp" => ContentType::WEBP,
+            "image/tiff" => ContentType::TIFF,
+            "video/mp4" => ContentType::MP4,
+            "video/mpeg" => ContentType::MPEG,
+            "image/gif" => ContentType::GIF,
             _ => ContentType::Binary, // Default content type
         }
     } else {
