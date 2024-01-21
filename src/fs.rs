@@ -35,7 +35,6 @@ pub fn generate_key_from_filename(filename: &str) -> String {
 
 pub fn is_key_cached(key: &str) -> bool {
     let path = generate_file_path(key);
-    println!("checking if file exists: {:?}", path);
     path.exists()
 }
 
