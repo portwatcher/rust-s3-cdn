@@ -1,10 +1,16 @@
-use crate::fs::{generate_file_path, save_stream_to_disk, determine_content_type, generate_key_from_filename};
+use crate::fs::{
+    generate_file_path,
+    save_stream_to_disk,
+    determine_content_type,
+    generate_key_from_filename,
+    is_key_cached,
+};
 use crate::s3::get_file_from_s3;
 
 use aws_sdk_s3::Client;
 use dotenv::dotenv;
 use lru::LruCache;
-use rocket::{get, http::ContentType, http::Status, main, routes, State};
+use rocket::{get, head, http::ContentType, http::Status, main, routes, State};
 use std::env;
 use std::path::{PathBuf, Path};
 use std::sync::Arc;
@@ -60,6 +66,22 @@ impl AppState {
         Ok(())
     }
 }
+
+
+#[head("/<path..>")]
+async fn hit(path: PathBuf) -> Result<Status, Status> {
+    let key = match path.into_os_string().into_string() {
+        Ok(k) => k,
+        Err(_) => return Err(Status::BadRequest),
+    };
+    let s3key = key.replace("\\", "/");
+    if is_key_cached(&s3key) {
+        return Ok(Status::Ok);
+    }
+
+    Err(Status::NotFound)
+}
+
 
 #[get("/<path..>")]
 async fn index(
@@ -136,6 +158,7 @@ async fn main() -> Result<(), rocket::Error> {
     let _rocket = rocket::build()
         .manage(state)
         .mount("/", routes![index])
+        .mount("/", routes![hit])
         .launch()
         .await?;
 
