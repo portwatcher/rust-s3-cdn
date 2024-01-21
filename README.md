@@ -32,6 +32,22 @@ or set these values in other config files like `docker-compose.yml`.
 They are essential for this program to run.
 
 
+## API
+
+```
+GET /:path
+```
+
+Return a cached file. If it is not cached, pull from s3.
+
+
+```
+HEAD /:path
+```
+
+Check if a file is cached
+
+
 ## Todo
 
 - ~~dockerize~~
