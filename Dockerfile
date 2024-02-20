@@ -1,4 +1,4 @@
-FROM rust:1.74.0 as builder
+FROM rust:1.75.0 as builder
 
 WORKDIR /app
 COPY . .
@@ -6,7 +6,7 @@ COPY . .
 RUN cargo build --release
 
 
-FROM rust:1.74.0
+FROM rust:1.75.0
 
 WORKDIR /app
 COPY --from=builder /app/target/release/s3-cdn .
