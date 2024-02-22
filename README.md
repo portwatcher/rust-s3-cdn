@@ -54,4 +54,4 @@ Check if a file is cached
 - invalidate interface
 - ~~restore lru object from files already cached~~
 - a background worker that auto removes files according to configured timeout
-- use stream
+- ~~use stream~~
