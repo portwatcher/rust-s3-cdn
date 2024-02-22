@@ -6,7 +6,7 @@ pub async fn get_file_from_s3(
     s3_client: &Client,
     bucket: &str,
     key: &str,
-) -> Result<(ByteStream, ContentType)> {
+) -> Result<(ByteStream, ContentType, usize)> {
     let resp = s3_client
         .get_object()
         .bucket(bucket)
@@ -20,5 +20,9 @@ pub async fn get_file_from_s3(
         .map(|ct| ct.parse::<ContentType>().unwrap_or(ContentType::Binary))
         .unwrap_or(ContentType::Binary);
 
-    Ok((resp.body, content_type))
+    let content_length = resp
+        .content_length()
+        .unwrap_or(0) as usize;
+
+    Ok((resp.body, content_type, content_length))
 }

@@ -1,20 +1,18 @@
 use crate::fs::{
     generate_file_path,
-    save_stream_to_disk,
     determine_content_type,
     generate_key_from_filename,
     is_key_cached,
 };
 use crate::s3::get_file_from_s3;
 
+use std::{env, path::{PathBuf, Path}, sync::Arc};
+use tokio::{sync::Mutex, io::{AsyncWriteExt, ReadHalf}, fs::File};
+use tokio_util::io::{StreamReader, ReaderStream};
+use rocket::{get, head, main, routes, Request, Response, State, http::{ContentType, Status, Header}, response::{self, Responder}};
 use aws_sdk_s3::Client;
 use dotenv::dotenv;
 use lru::LruCache;
-use rocket::{get, head, http::ContentType, http::Status, main, routes, State};
-use std::env;
-use std::path::{PathBuf, Path};
-use std::sync::Arc;
-use tokio::sync::Mutex;
 
 mod fs;
 mod s3;
@@ -82,12 +80,30 @@ async fn hit(path: PathBuf) -> Result<Status, Status> {
     Err(Status::NotFound)
 }
 
+struct ByteStreamResponse {
+    size: usize,
+    stream: ReaderStream<ReadHalf<File>>,
+    content_type: ContentType,
+}
+
+#[rocket::async_trait]
+impl<'r> Responder<'r, 'static> for ByteStreamResponse {
+    fn respond_to(self, _: &'r Request<'_>) -> response::Result<'static> {
+        let reader = StreamReader::new(self.stream);
+
+        Response::build()
+            .header(self.content_type)
+            .header(Header::new("Content-Length", self.size.to_string()))
+            .streamed_body(reader)
+            .ok()
+    }
+}
 
 #[get("/<path..>")]
 async fn index(
     path: PathBuf,
     state: &State<Arc<AppState>>,
-) -> Result<(ContentType, Vec<u8>), Status> {
+) -> Result<ByteStreamResponse, Status> {
     let key = match path.into_os_string().into_string() {
         Ok(k) => k,
         Err(_) => return Err(Status::BadRequest),
@@ -99,36 +115,68 @@ async fn index(
     {
         let mut cache = app_state.cache.lock().await;
         if let Some((file_path, content_type)) = cache.get(&s3key) {
-            if let Ok(data) = tokio::fs::read(&file_path).await {
+            if let Ok(file) = tokio::fs::File::open(&file_path).await {
+                let (file_reader, _) = tokio::io::split(file);
+                let file_stream = ReaderStream::new(file_reader);
+
                 if cfg!(debug_assertions) {
                     println!("served {} from cache", &s3key);
                 }
-                return Ok((content_type.clone(), data));
+
+                let size = match file_path.metadata() {
+                    Ok(m) => m.len() as usize,
+                    Err(_) => 0,
+                };
+
+                return Ok(ByteStreamResponse {
+                    size,
+                    stream: file_stream,
+                    content_type: content_type.clone(),
+                });
             }
         }
     }
 
     let bucket = env::var("S3_BUCKET_NAME").expect("S3_BUCKET_NAME must be set");
     match get_file_from_s3(&app_state.s3_client, &bucket, &s3key).await {
-        Ok((byte_stream, content_type)) => {
+        Ok((mut byte_stream, content_type, content_length)) => {
             let file_path = generate_file_path(&s3key);
 
-            // Save the stream to disk
-            if let Err(e) = save_stream_to_disk(&file_path, byte_stream).await {
-                eprintln!("Failed to save file: {}", e);
-                return Err(Status::InternalServerError);
+            // Create a new file and an in-memory buffer
+            let file = match tokio::fs::File::create(&file_path).await {
+                Ok(f) => f,
+                Err(_) => return Err(Status::InternalServerError),
+            };
+            let (file_reader, mut file_writer) = tokio::io::split(file);
+
+            // Duplicate the stream
+            while let Some(chunk) = byte_stream.next().await {
+                let chunk = match chunk {
+                    Ok(c) => c,
+                    Err(_) => return Err(Status::InternalServerError),
+                };
+                match file_writer.write_all(&chunk).await {
+                    Ok(_) => (),
+                    Err(_) => return Err(Status::InternalServerError),
+                };
             }
 
-            // Add to cache and read the file to send to the client
+            // Add to cache
             app_state
                 .add_to_cache(s3key.clone(), file_path.clone(), content_type.clone())
                 .await
                 .expect("add to cache failed");
-            let data = std::fs::read(&file_path).expect("Failed to read file");
+
             if cfg!(debug_assertions) {
                 println!("served {} from s3", &s3key);
             }
-            Ok((content_type, data))
+            let file_stream = ReaderStream::new(file_reader);
+
+            Ok(ByteStreamResponse {
+                size: content_length,
+                stream: file_stream,
+                content_type,
+            })
         }
         Err(_) => Err(Status::NotFound),
     }
