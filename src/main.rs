@@ -7,12 +7,19 @@ use crate::fs::{
 use crate::s3::get_file_from_s3;
 
 use std::{env, path::{PathBuf, Path}, sync::Arc};
-use tokio::{sync::Mutex, io::{AsyncWriteExt, ReadHalf}, fs::File};
+use tokio::{sync::Mutex, io::AsyncWriteExt};
 use tokio_util::io::{StreamReader, ReaderStream};
 use rocket::{get, head, main, routes, Request, Response, State, http::{ContentType, Status, Header}, response::{self, Responder}};
 use aws_sdk_s3::Client;
 use dotenv::dotenv;
 use lru::LruCache;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
+use futures::Stream;
+use std::pin::Pin;
+use bytes::Bytes;
+use futures::StreamExt;
+
 
 mod fs;
 mod s3;
@@ -70,7 +77,10 @@ impl AppState {
 async fn hit(path: PathBuf) -> Result<Status, Status> {
     let key = match path.into_os_string().into_string() {
         Ok(k) => k,
-        Err(_) => return Err(Status::BadRequest),
+        Err(e) => {
+            eprintln!("failed to convert path to string while heading: {:?}", e);
+            return Err(Status::BadRequest);
+        },
     };
     let s3key = key.replace("\\", "/");
     if is_key_cached(&s3key) {
@@ -82,7 +92,7 @@ async fn hit(path: PathBuf) -> Result<Status, Status> {
 
 struct ByteStreamResponse {
     size: usize,
-    stream: ReaderStream<ReadHalf<File>>,
+    stream: Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static>>,
     content_type: ContentType,
 }
 
@@ -106,7 +116,10 @@ async fn index(
 ) -> Result<ByteStreamResponse, Status> {
     let key = match path.into_os_string().into_string() {
         Ok(k) => k,
-        Err(_) => return Err(Status::BadRequest),
+        Err(e) => {
+            eprintln!("failed to convert path to string while getting: {:?}", e);
+            return Err(Status::BadRequest);
+        },
     };
 
     let s3key = key.replace("\\", "/");
@@ -125,12 +138,15 @@ async fn index(
 
                 let size = match file_path.metadata() {
                     Ok(m) => m.len() as usize,
-                    Err(_) => 0,
+                    Err(e) => {
+                        eprintln!("failed to get file size: {}", e);
+                        return Err(Status::InternalServerError);
+                    },
                 };
 
                 return Ok(ByteStreamResponse {
                     size,
-                    stream: file_stream,
+                    stream: Box::pin(file_stream),
                     content_type: content_type.clone(),
                 });
             }
@@ -145,21 +161,45 @@ async fn index(
             // Create a new file and an in-memory buffer
             let file = match tokio::fs::File::create(&file_path).await {
                 Ok(f) => f,
-                Err(_) => return Err(Status::InternalServerError),
+                Err(e) => {
+                    eprintln!("failed to create file: {}", e);
+                    return Err(Status::InternalServerError);
+                },
             };
-            let (file_reader, mut file_writer) = tokio::io::split(file);
+            let mut file_writer = tokio::io::BufWriter::new(file);
 
-            // Duplicate the stream
-            while let Some(chunk) = byte_stream.next().await {
-                let chunk = match chunk {
-                    Ok(c) => c,
-                    Err(_) => return Err(Status::InternalServerError),
-                };
-                match file_writer.write_all(&chunk).await {
-                    Ok(_) => (),
-                    Err(_) => return Err(Status::InternalServerError),
-                };
-            }
+            // Create a channel
+            let (tx, rx) = mpsc::channel(100);
+            let file_stream = ReceiverStream::new(rx).map(Ok);
+
+            // Spawn a new task to write to the file
+            tokio::spawn(async move {
+                while let Some(chunk) = byte_stream.next().await {
+                    let chunk = match chunk {
+                        Ok(c) => c,
+                        Err(e) => {
+                            eprintln!("failed to read from stream: {}", e);
+                            break;
+                        },
+                    };
+                    match file_writer.write_all(&chunk).await {
+                        Ok(_) => (),
+                        Err(e) => {
+                            eprintln!("failed to write to file: {}", e);
+                            break;
+                        },
+                    };
+                    // Send the chunk to the client
+                    if tx.send(chunk).await.is_err() {
+                        eprintln!("client disconnected");
+                        break;
+                    }
+                }
+                // Close the file writer
+                if let Err(e) = file_writer.shutdown().await {
+                    eprintln!("failed to close file writer: {}", e);
+                }
+            });
 
             // Add to cache
             app_state
@@ -170,15 +210,17 @@ async fn index(
             if cfg!(debug_assertions) {
                 println!("served {} from s3", &s3key);
             }
-            let file_stream = ReaderStream::new(file_reader);
 
             Ok(ByteStreamResponse {
                 size: content_length,
-                stream: file_stream,
+                stream: Box::pin(file_stream),
                 content_type,
             })
         }
-        Err(_) => Err(Status::NotFound),
+        Err(e) => {
+            eprintln!("failed to get file from s3: {}", e);
+            Err(Status::NotFound)
+        },
     }
 }
 

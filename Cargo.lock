@@ -1841,6 +1841,7 @@ dependencies = [
  "lru",
  "rocket",
  "tokio",
+ "tokio-stream",
  "tokio-util",
 ]
 

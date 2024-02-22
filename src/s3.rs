@@ -20,9 +20,12 @@ pub async fn get_file_from_s3(
         .map(|ct| ct.parse::<ContentType>().unwrap_or(ContentType::Binary))
         .unwrap_or(ContentType::Binary);
 
-    let content_length = resp
-        .content_length()
-        .unwrap_or(0) as usize;
+    let content_length = match resp.content_length() {
+        Some(len) => len as usize,
+        None => {
+            return Err(anyhow::anyhow!("No content length found in S3 response"));
+        },
+    };
 
     Ok((resp.body, content_type, content_length))
 }
