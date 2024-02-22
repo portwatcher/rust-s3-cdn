@@ -1,6 +1,5 @@
 use crate::fs::{
     generate_file_path,
-    save_stream_to_disk,
     determine_content_type,
     generate_key_from_filename,
     is_key_cached,
@@ -11,10 +10,8 @@ use aws_sdk_s3::Client;
 use dotenv::dotenv;
 use lru::LruCache;
 use rocket::{get, head, http::ContentType, http::Status, main, routes, State};
-use std::env;
-use std::path::{PathBuf, Path};
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::{path::{PathBuf, Path}, sync::Arc, env};
+use tokio::{sync::Mutex, io::AsyncWriteExt};
 
 mod fs;
 mod s3;
@@ -110,25 +107,48 @@ async fn index(
 
     let bucket = env::var("S3_BUCKET_NAME").expect("S3_BUCKET_NAME must be set");
     match get_file_from_s3(&app_state.s3_client, &bucket, &s3key).await {
-        Ok((byte_stream, content_type)) => {
+        Ok((mut byte_stream, content_type)) => {
             let file_path = generate_file_path(&s3key);
 
-            // Save the stream to disk
-            if let Err(e) = save_stream_to_disk(&file_path, byte_stream).await {
-                eprintln!("Failed to save file: {}", e);
-                return Err(Status::InternalServerError);
+            // Create a new file and an in-memory buffer
+            let mut file = match tokio::fs::File::create(&file_path).await {
+                Ok(f) => f,
+                Err(e) => {
+                    eprint!("failed to create file: {}", e);
+                    return Err(Status::InternalServerError);
+                },
+            };
+            let mut buffer = Vec::new();
+
+            // Duplicate the stream
+            while let Some(chunk) = byte_stream.next().await {
+                let chunk = match chunk {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprint!("failed to read stream: {}", e);
+                        return Err(Status::InternalServerError);
+                    },
+                };
+                match file.write_all(&chunk).await {
+                    Ok(_) => (),
+                    Err(e) => {
+                        eprint!("failed to write to file: {}", e);
+                        return Err(Status::InternalServerError);
+                    },
+                };
+                buffer.extend_from_slice(&chunk);
             }
 
-            // Add to cache and read the file to send to the client
+            // Add to cache
             app_state
                 .add_to_cache(s3key.clone(), file_path.clone(), content_type.clone())
                 .await
                 .expect("add to cache failed");
-            let data = std::fs::read(&file_path).expect("Failed to read file");
+
             if cfg!(debug_assertions) {
                 println!("served {} from s3", &s3key);
             }
-            Ok((content_type, data))
+            Ok((content_type, buffer))
         }
         Err(_) => Err(Status::NotFound),
     }
