@@ -42,6 +42,22 @@ pub fn determine_content_type(path: &Path) -> ContentType {
             "video/mp4" => ContentType::MP4,
             "video/mpeg" => ContentType::MPEG,
             "image/gif" => ContentType::GIF,
+            "application/zip" => ContentType::ZIP,
+            "application/pdf" => ContentType::PDF,
+            "application/epub+zip" => ContentType::EPUB,
+            "audio/mpeg" => ContentType::MP3,
+            "application/gzip" => ContentType::GZIP,
+            "audio/ogg" => ContentType::OGG,
+            "application/vnd.rar" => ContentType::RAR,
+            "text/plain" => ContentType::Plain,
+            "text/html" => ContentType::HTML,
+            "text/css" => ContentType::CSS,
+            "application/javascript" => ContentType::JavaScript,
+            "application/json" => ContentType::JSON,
+            "application/xml" => ContentType::XML,
+            "application/octet-stream" => ContentType::Binary,
+            "image/svg+xml" => ContentType::SVG,
+            "video/webm" => ContentType::WEBM,
             _ => ContentType::Binary, // Default content type
         }
     } else {
