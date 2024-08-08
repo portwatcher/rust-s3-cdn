@@ -2,21 +2,25 @@ use crate::fs::generate_file_path;
 use crate::s3::get_file_from_s3;
 use crate::AppState;
 
-use std::{env, path::PathBuf, sync::Arc, pin::Pin};
-use tokio::{sync::mpsc, io::AsyncWriteExt};
-use tokio_util::io::{StreamReader, ReaderStream};
-use rocket::{get, Request, Response, State, http::{ContentType, Status, Header}, response::{self, Responder}};
-use tokio_stream::wrappers::ReceiverStream;
-use futures::{Stream, StreamExt};
 use bytes::Bytes;
-
+use futures::{Stream, StreamExt};
+use rocket::{
+    get,
+    http::{ContentType, Header, Status},
+    response::{self, Responder},
+    Request, Response, State,
+};
+use std::{env, path::PathBuf, pin::Pin, sync::Arc};
+use tokio::{io::AsyncWriteExt, sync::mpsc};
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::io::{ReaderStream, StreamReader};
+use uuid::Uuid;
 
 pub struct ByteStreamResponse {
-  size: usize,
-  stream: Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static>>,
-  content_type: ContentType,
+    size: usize,
+    stream: Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static>>,
+    content_type: ContentType,
 }
-
 
 #[rocket::async_trait]
 impl<'r> Responder<'r, 'static> for ByteStreamResponse {
@@ -31,7 +35,6 @@ impl<'r> Responder<'r, 'static> for ByteStreamResponse {
     }
 }
 
-
 #[get("/<path..>")]
 pub async fn index(
     path: PathBuf,
@@ -42,7 +45,7 @@ pub async fn index(
         Err(e) => {
             eprintln!("failed to convert path to string while getting: {:?}", e);
             return Err(Status::BadRequest);
-        },
+        }
     };
 
     let s3key = key.replace("\\", "/");
@@ -64,7 +67,7 @@ pub async fn index(
                     Err(e) => {
                         eprintln!("failed to get file size: {}", e);
                         return Err(Status::InternalServerError);
-                    },
+                    }
                 };
 
                 return Ok(ByteStreamResponse {
@@ -79,15 +82,16 @@ pub async fn index(
     let bucket = env::var("S3_BUCKET_NAME").expect("S3_BUCKET_NAME must be set");
     match get_file_from_s3(&app_state.s3_client, &bucket, &s3key).await {
         Ok((mut byte_stream, content_type, content_length)) => {
-            let file_path = generate_file_path(&s3key);
+            let final_file_path = generate_file_path(&s3key);
+            let tmp_file_path = final_file_path.with_file_name(format!("{}.tmp", Uuid::new_v4()));
 
-            // Create a new file and an in-memory buffer
-            let file = match tokio::fs::File::create(&file_path).await {
+            // Create a new temporary file and an in-memory buffer
+            let file = match tokio::fs::File::create(&tmp_file_path).await {
                 Ok(f) => f,
                 Err(e) => {
-                    eprintln!("failed to create file: {}", e);
+                    eprintln!("failed to create temporary file: {}", e);
                     return Err(Status::InternalServerError);
-                },
+                }
             };
             let mut file_writer = tokio::io::BufWriter::new(file);
 
@@ -96,6 +100,8 @@ pub async fn index(
             let file_stream = ReceiverStream::new(rx).map(Ok);
 
             // Spawn a new task to write to the file
+            let tmp_file_path_clone = tmp_file_path.clone();
+            let final_file_path_clone = final_file_path.clone();
             tokio::spawn(async move {
                 while let Some(chunk) = byte_stream.next().await {
                     let chunk = match chunk {
@@ -103,14 +109,14 @@ pub async fn index(
                         Err(e) => {
                             eprintln!("failed to read from stream: {}", e);
                             break;
-                        },
+                        }
                     };
                     match file_writer.write_all(&chunk).await {
                         Ok(_) => (),
                         Err(e) => {
                             eprintln!("failed to write to file: {}", e);
                             break;
-                        },
+                        }
                     };
                     // Send the chunk to the client
                     if tx.send(chunk).await.is_err() {
@@ -122,11 +128,18 @@ pub async fn index(
                 if let Err(e) = file_writer.shutdown().await {
                     eprintln!("failed to close file writer: {}", e);
                 }
+
+                // Rename the temporary file to the final file name
+                if let Err(e) =
+                    tokio::fs::rename(&tmp_file_path_clone, &final_file_path_clone).await
+                {
+                    eprintln!("failed to rename temporary file: {}", e);
+                }
             });
 
             // Add to cache
             app_state
-                .add_to_cache(s3key.clone(), file_path.clone(), content_type.clone())
+                .add_to_cache(s3key.clone(), final_file_path.clone(), content_type.clone())
                 .await
                 .expect("add to cache failed");
 
@@ -143,6 +156,6 @@ pub async fn index(
         Err(e) => {
             eprintln!("failed to get file from s3: {}", e);
             Err(Status::NotFound)
-        },
+        }
     }
 }

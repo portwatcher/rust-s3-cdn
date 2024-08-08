@@ -1,19 +1,19 @@
-use crate::fs::{
-    determine_content_type,
-    generate_key_from_filename,
-};
+use crate::fs::{determine_content_type, generate_key_from_filename};
 
-use std::{env, path::{PathBuf, Path}, sync::Arc};
-use tokio::sync::Mutex;
-use rocket::{main, routes, http::ContentType};
 use aws_sdk_s3::Client;
 use dotenv::dotenv;
 use lru::LruCache;
-
+use rocket::{http::ContentType, main, routes};
+use std::{
+    env,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+use tokio::sync::Mutex;
 
 mod fs;
-mod s3;
 mod routes;
+mod s3;
 
 pub struct AppState {
     cache: Mutex<LruCache<String, (PathBuf, ContentType)>>,
@@ -63,7 +63,6 @@ impl AppState {
     }
 }
 
-
 #[main]
 async fn main() -> Result<(), rocket::Error> {
     dotenv().ok();
@@ -83,11 +82,17 @@ async fn main() -> Result<(), rocket::Error> {
         s3_client,
     });
 
-    state.rebuild_cache_from_disk().await.expect("rebuild cache failed");
+    state
+        .rebuild_cache_from_disk()
+        .await
+        .expect("rebuild cache failed");
 
     let _rocket = rocket::build()
         .manage(state)
-        .mount("/", routes![routes::get_object::index, routes::head_object::hit])
+        .mount(
+            "/",
+            routes![routes::get_object::index, routes::head_object::hit],
+        )
         .launch()
         .await?;
 
