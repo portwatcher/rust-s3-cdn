@@ -1,4 +1,4 @@
-use crate::fs::generate_file_path;
+use crate::fs::{determine_content_type, generate_file_path, get_cached_file_path};
 use crate::s3::get_file_from_s3;
 use crate::AppState;
 
@@ -49,38 +49,33 @@ pub async fn index(
     };
 
     let s3key = key.replace("\\", "/");
-    let app_state = state.inner();
 
-    {
-        let mut cache = app_state.cache.lock().await;
-        if let Some((file_path, content_type)) = cache.get(&s3key) {
-            if let Ok(file) = tokio::fs::File::open(&file_path).await {
-                let (file_reader, _) = tokio::io::split(file);
-                let file_stream = ReaderStream::new(file_reader);
+    if let Some(file_path) = get_cached_file_path(&s3key).await {
+        if let Ok(file) = tokio::fs::File::open(&file_path).await {
+            let (file_reader, _) = tokio::io::split(file);
+            let file_stream = ReaderStream::new(file_reader);
 
-                if cfg!(debug_assertions) {
-                    println!("served {} from cache", &s3key);
-                }
-
-                let size = match file_path.metadata() {
-                    Ok(m) => m.len() as usize,
-                    Err(e) => {
-                        eprintln!("failed to get file size: {}", e);
-                        return Err(Status::InternalServerError);
-                    }
-                };
-
-                return Ok(ByteStreamResponse {
-                    size,
-                    stream: Box::pin(file_stream),
-                    content_type: content_type.clone(),
-                });
+            if cfg!(debug_assertions) {
+                println!("served {} from cache", &s3key);
             }
+
+            let size = match file_path.metadata() {
+                Ok(m) => m.len() as usize,
+                Err(e) => {
+                    eprintln!("failed to get file size: {}", e);
+                    return Err(Status::InternalServerError);
+                }
+            };
+
+            return Ok(ByteStreamResponse {
+                size,
+                stream: Box::pin(file_stream),
+                content_type: determine_content_type(&file_path),
+            });
         }
     }
-
     let bucket = env::var("S3_BUCKET_NAME").expect("S3_BUCKET_NAME must be set");
-    match get_file_from_s3(&app_state.s3_client, &bucket, &s3key).await {
+    match get_file_from_s3(&state.s3_client, &bucket, &s3key).await {
         Ok((mut byte_stream, content_type, content_length)) => {
             let final_file_path = generate_file_path(&s3key);
             let tmp_file_path = final_file_path.with_file_name(format!("{}.tmp", Uuid::new_v4()));
@@ -136,12 +131,6 @@ pub async fn index(
                     eprintln!("failed to rename temporary file: {}", e);
                 }
             });
-
-            // Add to cache
-            app_state
-                .add_to_cache(s3key.clone(), final_file_path.clone(), content_type.clone())
-                .await
-                .expect("add to cache failed");
 
             if cfg!(debug_assertions) {
                 println!("served {} from s3", &s3key);

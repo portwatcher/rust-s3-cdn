@@ -1,9 +1,9 @@
-use std::env;
-use std::path::{Path, PathBuf};
 use infer::Infer;
 use rocket::http::ContentType;
+use std::env;
 use std::io::Read;
-
+use std::path::{Path, PathBuf};
+use tokio::fs;
 
 pub fn generate_file_path(key: &str) -> PathBuf {
     let safe_key = key.replace("/", "_");
@@ -13,11 +13,9 @@ pub fn generate_file_path(key: &str) -> PathBuf {
     path
 }
 
-
 pub fn generate_key_from_filename(filename: &str) -> String {
     filename.replace("_", "/")
 }
-
 
 pub fn is_key_cached(key: &str) -> bool {
     let path = generate_file_path(key);
@@ -25,6 +23,14 @@ pub fn is_key_cached(key: &str) -> bool {
     path.exists()
 }
 
+pub async fn get_cached_file_path(key: &str) -> Option<PathBuf> {
+    let path = generate_file_path(key);
+    if fs::metadata(&path).await.is_ok() {
+        Some(path)
+    } else {
+        None
+    }
+}
 
 pub fn determine_content_type(path: &Path) -> ContentType {
     let mut buf = [0; 10]; // buffer to read file's initial bytes
@@ -63,4 +69,25 @@ pub fn determine_content_type(path: &Path) -> ContentType {
     } else {
         ContentType::Binary // Default if unable to infer
     }
+}
+
+pub async fn clean_old_files(max_age: std::time::Duration) -> Result<(), std::io::Error> {
+    let dir = env::var("CACHE_DIR").expect("CACHE_DIR must be set");
+    let cache_dir = Path::new(&dir);
+    let mut entries = fs::read_dir(cache_dir).await?;
+
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if path.is_file() {
+            if let Ok(metadata) = fs::metadata(&path).await {
+                if let Ok(modified) = metadata.modified() {
+                    if modified.elapsed().unwrap_or(std::time::Duration::ZERO) > max_age {
+                        fs::remove_file(&path).await?;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
