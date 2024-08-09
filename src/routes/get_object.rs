@@ -11,7 +11,7 @@ use rocket::{
     Request, Response, State,
 };
 use std::{env, path::PathBuf, pin::Pin};
-use tokio::{io::AsyncWriteExt, sync::mpsc};
+use tokio::{fs, io::AsyncWriteExt, sync::mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::io::{ReaderStream, StreamReader};
 use uuid::Uuid;
@@ -37,6 +37,11 @@ impl<'r> Responder<'r, 'static> for ByteStreamResponse {
 
 #[get("/<path..>")]
 pub async fn index(path: PathBuf, state: &State<AppState>) -> Result<ByteStreamResponse, Status> {
+    // Check if the path is empty (root path)
+    if path.as_os_str().is_empty() {
+        return Err(Status::NotFound);
+    }
+
     let key = match path.into_os_string().into_string() {
         Ok(k) => k,
         Err(e) => {
@@ -47,10 +52,13 @@ pub async fn index(path: PathBuf, state: &State<AppState>) -> Result<ByteStreamR
 
     let s3key = key.replace("\\", "/");
 
+    // Check if the file is already cached
     if let Some(file_path) = get_cached_file_path(&s3key).await {
-        if let Ok(file) = tokio::fs::File::open(&file_path).await {
+        if let Ok(file) = fs::File::open(&file_path).await {
             let (file_reader, _) = tokio::io::split(file);
             let file_stream = ReaderStream::new(file_reader);
+
+            let content_type = determine_content_type(&file_path);
 
             if cfg!(debug_assertions) {
                 println!("served {} from cache", &s3key);
@@ -67,10 +75,11 @@ pub async fn index(path: PathBuf, state: &State<AppState>) -> Result<ByteStreamR
             return Ok(ByteStreamResponse {
                 size,
                 stream: Box::pin(file_stream),
-                content_type: determine_content_type(&file_path),
+                content_type,
             });
         }
     }
+
     let bucket = env::var("S3_BUCKET_NAME").expect("S3_BUCKET_NAME must be set");
     match get_file_from_s3(&state.s3_client, &bucket, &s3key).await {
         Ok((mut byte_stream, content_type, content_length)) => {
@@ -78,7 +87,7 @@ pub async fn index(path: PathBuf, state: &State<AppState>) -> Result<ByteStreamR
             let tmp_file_path = final_file_path.with_file_name(format!("{}.tmp", Uuid::new_v4()));
 
             // Create a new temporary file and an in-memory buffer
-            let file = match tokio::fs::File::create(&tmp_file_path).await {
+            let file = match fs::File::create(&tmp_file_path).await {
                 Ok(f) => f,
                 Err(e) => {
                     eprintln!("failed to create temporary file: {}", e);
@@ -122,9 +131,7 @@ pub async fn index(path: PathBuf, state: &State<AppState>) -> Result<ByteStreamR
                 }
 
                 // Rename the temporary file to the final file name
-                if let Err(e) =
-                    tokio::fs::rename(&tmp_file_path_clone, &final_file_path_clone).await
-                {
+                if let Err(e) = fs::rename(&tmp_file_path_clone, &final_file_path_clone).await {
                     eprintln!("failed to rename temporary file: {}", e);
                 }
             });
