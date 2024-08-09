@@ -10,7 +10,7 @@ use rocket::{
     response::{self, Responder},
     Request, Response, State,
 };
-use std::{env, path::PathBuf, pin::Pin, sync::Arc};
+use std::{env, path::PathBuf, pin::Pin};
 use tokio::{io::AsyncWriteExt, sync::mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::io::{ReaderStream, StreamReader};
@@ -36,10 +36,7 @@ impl<'r> Responder<'r, 'static> for ByteStreamResponse {
 }
 
 #[get("/<path..>")]
-pub async fn index(
-    path: PathBuf,
-    state: &State<Arc<AppState>>,
-) -> Result<ByteStreamResponse, Status> {
+pub async fn index(path: PathBuf, state: &State<AppState>) -> Result<ByteStreamResponse, Status> {
     let key = match path.into_os_string().into_string() {
         Ok(k) => k,
         Err(e) => {
