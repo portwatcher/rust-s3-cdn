@@ -13,10 +13,6 @@ pub fn generate_file_path(key: &str) -> PathBuf {
     path
 }
 
-pub fn generate_key_from_filename(filename: &str) -> String {
-    filename.replace("_", "/")
-}
-
 pub fn is_key_cached(key: &str) -> bool {
     let path = generate_file_path(key);
     println!("checking if file exists: {:?}", path);
