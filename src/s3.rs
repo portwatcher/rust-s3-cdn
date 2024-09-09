@@ -6,7 +6,7 @@ pub async fn get_file_from_s3(
     s3_client: &Client,
     bucket: &str,
     key: &str,
-) -> Result<(ByteStream, ContentType, usize)> {
+) -> Result<(ByteStream, ContentType, usize, String)> {
     let resp = s3_client
         .get_object()
         .bucket(bucket)
@@ -24,8 +24,13 @@ pub async fn get_file_from_s3(
         Some(len) => len as usize,
         None => {
             return Err(anyhow::anyhow!("No content length found in S3 response"));
-        },
+        }
     };
 
-    Ok((resp.body, content_type, content_length))
+    let etag = resp
+        .e_tag()
+        .ok_or_else(|| anyhow::anyhow!("No ETag found in S3 response"))?
+        .to_string();
+
+    Ok((resp.body, content_type, content_length, etag))
 }

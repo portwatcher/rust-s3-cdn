@@ -54,3 +54,4 @@ Check if a file is cached
 - invalidate interface
 - ~~a background worker that auto removes files according to configured timeout~~
 - ~~use stream~~
+- ~~check etag checksum~~

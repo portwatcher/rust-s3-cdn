@@ -4,6 +4,7 @@ use crate::AppState;
 
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
+use md5;
 use rocket::{
     get,
     http::{ContentType, Header, Status},
@@ -82,7 +83,7 @@ pub async fn index(path: PathBuf, state: &State<AppState>) -> Result<ByteStreamR
 
     let bucket = env::var("S3_BUCKET_NAME").expect("S3_BUCKET_NAME must be set");
     match get_file_from_s3(&state.s3_client, &bucket, &s3key).await {
-        Ok((mut byte_stream, content_type, content_length)) => {
+        Ok((mut byte_stream, content_type, content_length, etag)) => {
             let final_file_path = generate_file_path(&s3key);
             let tmp_file_path = final_file_path.with_file_name(format!("{}.tmp", Uuid::new_v4()));
 
@@ -130,10 +131,29 @@ pub async fn index(path: PathBuf, state: &State<AppState>) -> Result<ByteStreamR
                     eprintln!("failed to close file writer: {}", e);
                 }
 
-                // Rename the temporary file to the final file name
-                if let Err(e) = fs::rename(&tmp_file_path_clone, &final_file_path_clone).await {
-                    eprintln!("failed to rename temporary file: {}", e);
+                // Verify checksum
+                let file_content = fs::read(&tmp_file_path_clone).await.map_err(|e| {
+                    eprintln!("failed to read temporary file: {}", e);
+                    e
+                })?;
+                let file_md5 = format!("\"{:x}\"", md5::compute(&file_content));
+
+                if file_md5 == etag {
+                    // Rename the temporary file to the final file name
+                    if let Err(e) = fs::rename(&tmp_file_path_clone, &final_file_path_clone).await {
+                        eprintln!("failed to rename temporary file: {}", e);
+                    }
+                } else {
+                    eprintln!("Checksum mismatch. Expected: {}, Got: {}", etag, file_md5);
+                    // Optionally, you can retry the download here
+
+                    // For now, we'll just delete the temporary file
+                    if let Err(e) = fs::remove_file(&tmp_file_path_clone).await {
+                        eprintln!("failed to remove temporary file: {}", e);
+                    }
                 }
+
+                Ok::<_, std::io::Error>(())
             });
 
             if cfg!(debug_assertions) {
