@@ -3,7 +3,7 @@ use crate::s3::get_file_from_s3;
 use crate::AppState;
 
 use bytes::Bytes;
-use futures::{Stream, StreamExt};
+use futures::Stream;
 use md5;
 use rocket::{
     get,
@@ -12,8 +12,7 @@ use rocket::{
     Request, Response, State,
 };
 use std::{env, path::PathBuf, pin::Pin};
-use tokio::{fs, io::AsyncWriteExt, sync::mpsc};
-use tokio_stream::wrappers::ReceiverStream;
+use tokio::{fs, io::AsyncWriteExt};
 use tokio_util::io::{ReaderStream, StreamReader};
 use uuid::Uuid;
 
@@ -81,13 +80,19 @@ pub async fn index(path: PathBuf, state: &State<AppState>) -> Result<ByteStreamR
         }
     }
 
-    let bucket = env::var("S3_BUCKET_NAME").expect("S3_BUCKET_NAME must be set");
+    println!("{} not cached, fetching from s3", &s3key);
+
+    let bucket = if cfg!(debug_assertions) {
+        env::var("TEST_S3_BUCKET_NAME").expect("TEST_S3_BUCKET_NAME must be set")
+    } else {
+        env::var("S3_BUCKET_NAME").expect("S3_BUCKET_NAME must be set")
+    };
     match get_file_from_s3(&state.s3_client, &bucket, &s3key).await {
         Ok((mut byte_stream, content_type, content_length, etag)) => {
             let final_file_path = generate_file_path(&s3key);
             let tmp_file_path = final_file_path.with_file_name(format!("{}.tmp", Uuid::new_v4()));
 
-            // Create a new temporary file and an in-memory buffer
+            // Create a new temporary file
             let file = match fs::File::create(&tmp_file_path).await {
                 Ok(f) => f,
                 Err(e) => {
@@ -97,64 +102,47 @@ pub async fn index(path: PathBuf, state: &State<AppState>) -> Result<ByteStreamR
             };
             let mut file_writer = tokio::io::BufWriter::new(file);
 
-            // Create a channel
-            let (tx, rx) = mpsc::channel(100);
-            let file_stream = ReceiverStream::new(rx).map(Ok);
-
-            // Spawn a new task to write to the file
-            let tmp_file_path_clone = tmp_file_path.clone();
-            let final_file_path_clone = final_file_path.clone();
-            tokio::spawn(async move {
-                while let Some(chunk) = byte_stream.next().await {
-                    let chunk = match chunk {
-                        Ok(c) => c,
-                        Err(e) => {
-                            eprintln!("failed to read from stream: {}", e);
-                            break;
-                        }
-                    };
-                    match file_writer.write_all(&chunk).await {
-                        Ok(_) => (),
-                        Err(e) => {
-                            eprintln!("failed to write to file: {}", e);
-                            break;
-                        }
-                    };
-                    // Send the chunk to the client
-                    if tx.send(chunk).await.is_err() {
-                        eprintln!("client disconnected");
-                        break;
+            // Write the file content
+            while let Some(chunk) = byte_stream.next().await {
+                let chunk = match chunk {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("failed to read from stream: {}", e);
+                        return Err(Status::InternalServerError);
                     }
+                };
+                if let Err(e) = file_writer.write_all(&chunk).await {
+                    eprintln!("failed to write to file: {}", e);
+                    return Err(Status::InternalServerError);
                 }
-                // Close the file writer
-                if let Err(e) = file_writer.shutdown().await {
-                    eprintln!("failed to close file writer: {}", e);
+            }
+
+            // Close the file writer
+            if let Err(e) = file_writer.shutdown().await {
+                eprintln!("failed to close file writer: {}", e);
+                return Err(Status::InternalServerError);
+            }
+
+            // Verify checksum
+            let file_content = fs::read(&tmp_file_path).await.map_err(|e| {
+                eprintln!("failed to read temporary file: {}", e);
+                Status::InternalServerError
+            })?;
+            let file_md5 = format!("\"{:x}\"", md5::compute(&file_content));
+
+            if file_md5 == etag {
+                // Rename the temporary file to the final file name
+                if let Err(e) = fs::rename(&tmp_file_path, &final_file_path).await {
+                    eprintln!("failed to rename temporary file: {}", e);
+                    return Err(Status::InternalServerError);
                 }
-
-                // Verify checksum
-                let file_content = fs::read(&tmp_file_path_clone).await.map_err(|e| {
-                    eprintln!("failed to read temporary file: {}", e);
-                    e
-                })?;
-                let file_md5 = format!("\"{:x}\"", md5::compute(&file_content));
-
-                if file_md5 == etag {
-                    // Rename the temporary file to the final file name
-                    if let Err(e) = fs::rename(&tmp_file_path_clone, &final_file_path_clone).await {
-                        eprintln!("failed to rename temporary file: {}", e);
-                    }
-                } else {
-                    eprintln!("Checksum mismatch. Expected: {}, Got: {}", etag, file_md5);
-                    // Optionally, you can retry the download here
-
-                    // For now, we'll just delete the temporary file
-                    if let Err(e) = fs::remove_file(&tmp_file_path_clone).await {
-                        eprintln!("failed to remove temporary file: {}", e);
-                    }
+            } else {
+                eprintln!("Checksum mismatch. Expected: {}, Got: {}", etag, file_md5);
+                if let Err(e) = fs::remove_file(&tmp_file_path).await {
+                    eprintln!("failed to remove temporary file: {}", e);
                 }
-
-                Ok::<_, std::io::Error>(())
-            });
+                return Err(Status::InternalServerError);
+            }
 
             if cfg!(debug_assertions) {
                 println!("served {} from s3", &s3key);
@@ -162,7 +150,9 @@ pub async fn index(path: PathBuf, state: &State<AppState>) -> Result<ByteStreamR
 
             Ok(ByteStreamResponse {
                 size: content_length,
-                stream: Box::pin(file_stream),
+                stream: Box::pin(tokio_util::io::ReaderStream::new(
+                    tokio::fs::File::open(&final_file_path).await.unwrap(),
+                )),
                 content_type,
             })
         }
