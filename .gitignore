@@ -4,3 +4,4 @@ secret.rs
 .env
 build.sh
 build-local.sh
+.DS_Store

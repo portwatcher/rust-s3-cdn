@@ -1,6 +1,6 @@
 # rust-s3-cdn
 
-A simple LRU cached proxy for AWS S3 written in Rust
+A simple cache proxy for AWS S3 written in Rust
 
 ## why
 
@@ -52,6 +52,6 @@ Check if a file is cached
 
 - ~~dockerize~~
 - invalidate interface
-- ~~restore lru object from files already cached~~
-- a background worker that auto removes files according to configured timeout
-- use stream
+- ~~a background worker that auto removes files according to configured timeout~~
+- ~~use stream~~
+- ~~check etag checksum~~
