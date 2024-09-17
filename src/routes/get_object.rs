@@ -1,7 +1,7 @@
 use crate::fs::{
     determine_content_type, extract_etag_from_filename, generate_file_path, get_cached_file_path,
 };
-use crate::s3::{get_file_from_s3, S3Error};
+use crate::s3::{get_file_from_s3, get_object_etag, S3Error};
 use crate::AppState;
 
 use bytes::Bytes;
@@ -62,40 +62,50 @@ pub async fn index(path: PathBuf, state: &State<AppState>) -> Result<ByteStreamR
                 Status::InternalServerError
             })?;
 
-            if let Some(etag) = etag {
-                let calculated_md5 = format!("\"{:x}\"", md5::compute(&content));
-                if calculated_md5 != etag {
-                    // ETag mismatch, delete the cached file
-                    if let Err(e) = fs::remove_file(&file_path).await {
-                        eprintln!("failed to remove outdated cached file: {}", e);
+            let (etag, needs_rename) = match etag {
+                Some(e) => (e, false),
+                None => {
+                    // Fetch etag from S3 if not present in filename
+                    let bucket = if cfg!(debug_assertions) {
+                        env::var("TEST_S3_BUCKET_NAME").expect("TEST_S3_BUCKET_NAME must be set")
+                    } else {
+                        env::var("S3_BUCKET_NAME").expect("S3_BUCKET_NAME must be set")
+                    };
+                    match get_object_etag(&state.s3_client, &bucket, &s3key).await {
+                        Ok(e) => (e, true),
+                        Err(e) => {
+                            eprintln!("Failed to get etag from S3: {:?}", e);
+                            return Err(Status::InternalServerError);
+                        }
                     }
-                    // Continue to fetch from S3
-                } else {
-                    // ETag matches, serve the file
-                    let (file_reader, _) = tokio::io::split(file);
-                    let file_stream = ReaderStream::new(file_reader);
-                    let content_type = determine_content_type(&file_path);
-                    let size = content.len();
-
-                    if cfg!(debug_assertions) {
-                        println!("served {} from cache", &s3key);
-                    }
-
-                    return Ok(ByteStreamResponse {
-                        size,
-                        stream: Box::pin(file_stream),
-                        content_type,
-                    });
                 }
+            };
+
+            let calculated_md5 = format!("\"{:x}\"", md5::compute(&content));
+            if calculated_md5 != etag {
+                // ETag mismatch, delete the cached file
+                if let Err(e) = fs::remove_file(&file_path).await {
+                    eprintln!("failed to remove outdated cached file: {}", e);
+                }
+                // Continue to fetch from S3
             } else {
-                // No ETag in filename, serve the file without checking
+                // ETag matches, serve the file
+                if needs_rename {
+                    // Rename the file to include the etag
+                    let new_file_path = generate_file_path(&s3key, &etag);
+                    if let Err(e) = fs::rename(&file_path, &new_file_path).await {
+                        eprintln!("failed to rename cached file with etag: {}", e);
+                        // Continue serving the file even if rename fails
+                    }
+                }
+
                 let (file_reader, _) = tokio::io::split(file);
                 let file_stream = ReaderStream::new(file_reader);
                 let content_type = determine_content_type(&file_path);
                 let size = content.len();
 
                 if cfg!(debug_assertions) {
-                    println!("served {} from cache (legacy format)", &s3key);
+                    println!("served {} from cache", &s3key);
                 }
 
                 return Ok(ByteStreamResponse {

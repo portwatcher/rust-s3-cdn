@@ -49,3 +49,17 @@ pub async fn get_file_from_s3(
         Err(e) => Err(S3Error::RequestFailed(e.to_string())),
     }
 }
+
+pub async fn get_object_etag(
+    s3_client: &Client,
+    bucket: &str,
+    key: &str,
+) -> Result<String, S3Error> {
+    match s3_client.head_object().bucket(bucket).key(key).send().await {
+        Ok(resp) => resp
+            .e_tag()
+            .ok_or(S3Error::NoETag)
+            .map(|etag| etag.to_string()),
+        Err(e) => Err(S3Error::RequestFailed(e.to_string())),
+    }
+}
