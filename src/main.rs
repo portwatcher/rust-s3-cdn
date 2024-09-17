@@ -1,4 +1,4 @@
-use aws_sdk_s3::Client;
+use aws_sdk_s3::{config::StalledStreamProtectionConfig, Client};
 use dotenv::dotenv;
 use rocket::{main, routes};
 use tokio::time::Duration;
@@ -15,7 +15,14 @@ pub struct AppState {
 async fn main() -> Result<(), rocket::Error> {
     dotenv().ok();
 
-    let config = aws_config::load_from_env().await;
+    let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .stalled_stream_protection(
+            StalledStreamProtectionConfig::enabled()
+                .download_enabled(false)
+                .build(),
+        )
+        .load()
+        .await;
     let s3_client = Client::new(&config);
     let state = AppState { s3_client };
 
