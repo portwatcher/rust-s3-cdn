@@ -1,7 +1,8 @@
 use crate::fs::{determine_content_type, generate_file_path, get_cached_file_path};
-use crate::s3::get_file_from_s3;
+use crate::s3::{get_file_from_s3, S3Error};
 use crate::AppState;
 
+use aws_sdk_s3::{primitives::ByteStream, Client};
 use bytes::Bytes;
 use futures::Stream;
 use rocket::{
@@ -31,6 +32,49 @@ impl<'r> Responder<'r, 'static> for ByteStreamResponse {
             .header(Header::new("Content-Length", self.size.to_string()))
             .streamed_body(reader)
             .ok()
+    }
+}
+
+async fn get_file_with_retry(
+    s3_client: &Client,
+    bucket: &str,
+    s3key: &str,
+    max_retries: usize,
+) -> Result<(ByteStream, ContentType, u64), S3Error> {
+    let mut retries = 0;
+    loop {
+        match get_file_from_s3(s3_client, bucket, s3key).await {
+            Ok(result) => return Ok(result),
+            Err(S3Error::ETagMismatch { computed, expected }) => {
+                eprintln!(
+                    "ETag mismatch for key '{}'. Computed: {}, Expected: {}. Retry {} of {}",
+                    s3key,
+                    computed,
+                    expected,
+                    retries + 1,
+                    max_retries
+                );
+                if retries >= max_retries {
+                    return Err(S3Error::ETagMismatch { computed, expected });
+                }
+                retries += 1;
+            }
+            Err(S3Error::SizeMismatch { expected, actual }) => {
+                eprintln!(
+                    "Size mismatch for key '{}'. Expected: {}, Actual: {}. Retry {} of {}",
+                    s3key,
+                    expected,
+                    actual,
+                    retries + 1,
+                    max_retries
+                );
+                if retries >= max_retries {
+                    return Err(S3Error::SizeMismatch { expected, actual });
+                }
+                retries += 1;
+            }
+            Err(e) => return Err(e),
+        }
     }
 }
 
@@ -80,7 +124,7 @@ pub async fn index(path: PathBuf, state: &State<AppState>) -> Result<ByteStreamR
         env::var("S3_BUCKET_NAME").expect("S3_BUCKET_NAME must be set")
     };
 
-    match get_file_from_s3(&state.s3_client, &bucket, &s3key).await {
+    match get_file_with_retry(&state.s3_client, &bucket, &s3key, 5).await {
         Ok((mut byte_stream, content_type, content_length)) => {
             let file_path = generate_file_path(&s3key);
             let tmp_file_path = file_path.with_file_name(format!("{}.tmp", Uuid::new_v4()));
@@ -127,7 +171,7 @@ pub async fn index(path: PathBuf, state: &State<AppState>) -> Result<ByteStreamR
             }
 
             Ok(ByteStreamResponse {
-                size: content_length,
+                size: content_length as usize,
                 stream: Box::pin(tokio_util::io::ReaderStream::new(
                     tokio::fs::File::open(&file_path).await.unwrap(),
                 )),
@@ -135,7 +179,10 @@ pub async fn index(path: PathBuf, state: &State<AppState>) -> Result<ByteStreamR
             })
         }
         Err(e) => {
-            eprintln!("failed to get file from s3: {:?}", e);
+            eprintln!(
+                "Failed to get file from S3 for key: {:?}, error: {:?}",
+                s3key, e
+            );
             Err(Status::InternalServerError)
         }
     }
