@@ -5,18 +5,18 @@ use rocket::http::ContentType;
 
 #[derive(Debug)]
 pub enum S3Error {
-    RequestFailed(String),
+    RequestFailed,
     NoContentLength,
     NoETag,
     ETagMismatch,
-    ChunkReadError(String),
+    ChunkReadError,
 }
 
 pub async fn get_file_from_s3(
     s3_client: &Client,
     bucket: &str,
     key: &str,
-) -> Result<(ByteStream, ContentType, usize, String), S3Error> {
+) -> Result<(ByteStream, ContentType, usize), S3Error> {
     match s3_client.get_object().bucket(bucket).key(key).send().await {
         Ok(resp) => {
             let content_type = resp
@@ -30,36 +30,18 @@ pub async fn get_file_from_s3(
             let mut body = resp.body;
             let mut bytes = Vec::with_capacity(content_length);
 
-            while let Some(chunk) = body
-                .try_next()
-                .await
-                .map_err(|e| S3Error::ChunkReadError(e.to_string()))?
-            {
+            while let Some(chunk) = body.try_next().await.map_err(|_| S3Error::ChunkReadError)? {
                 bytes.extend_from_slice(&chunk);
             }
 
             let computed_etag = format!("\"{:x}\"", md5::compute(&bytes));
 
             if computed_etag == etag {
-                Ok((ByteStream::from(bytes), content_type, content_length, etag))
+                Ok((ByteStream::from(bytes), content_type, content_length))
             } else {
                 Err(S3Error::ETagMismatch)
             }
         }
-        Err(e) => Err(S3Error::RequestFailed(e.to_string())),
-    }
-}
-
-pub async fn get_object_etag(
-    s3_client: &Client,
-    bucket: &str,
-    key: &str,
-) -> Result<String, S3Error> {
-    match s3_client.head_object().bucket(bucket).key(key).send().await {
-        Ok(resp) => resp
-            .e_tag()
-            .ok_or(S3Error::NoETag)
-            .map(|etag| etag.to_string()),
-        Err(e) => Err(S3Error::RequestFailed(e.to_string())),
+        Err(_e) => Err(S3Error::RequestFailed),
     }
 }

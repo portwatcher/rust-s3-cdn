@@ -1,12 +1,9 @@
-use crate::fs::{
-    determine_content_type, extract_etag_from_filename, generate_file_path, get_cached_file_path,
-};
-use crate::s3::{get_file_from_s3, get_object_etag, S3Error};
+use crate::fs::{determine_content_type, generate_file_path, get_cached_file_path};
+use crate::s3::get_file_from_s3;
 use crate::AppState;
 
 use bytes::Bytes;
 use futures::Stream;
-use md5;
 use rocket::{
     get,
     http::{ContentType, Header, Status},
@@ -53,81 +50,40 @@ pub async fn index(path: PathBuf, state: &State<AppState>) -> Result<ByteStreamR
 
     let s3key = key.replace("\\", "/");
 
-    // Check if the file is already cached
     if let Some(file_path) = get_cached_file_path(&s3key).await {
-        let etag = extract_etag_from_filename(&file_path);
         if let Ok(file) = fs::File::open(&file_path).await {
-            let content = fs::read(&file_path).await.map_err(|e| {
-                eprintln!("failed to read cached file: {}", e);
+            let content_type = determine_content_type(&file_path);
+            let metadata = file.metadata().await.map_err(|e| {
+                eprintln!("failed to get file metadata: {}", e);
                 Status::InternalServerError
             })?;
+            let size = metadata.len() as usize;
 
-            let (etag, needs_rename) = match etag {
-                Some(e) => (e, false),
-                None => {
-                    // Fetch etag from S3 if not present in filename
-                    let bucket = if cfg!(debug_assertions) {
-                        env::var("TEST_S3_BUCKET_NAME").expect("TEST_S3_BUCKET_NAME must be set")
-                    } else {
-                        env::var("S3_BUCKET_NAME").expect("S3_BUCKET_NAME must be set")
-                    };
-                    match get_object_etag(&state.s3_client, &bucket, &s3key).await {
-                        Ok(e) => (e, true),
-                        Err(e) => {
-                            eprintln!("Failed to get etag from S3: {:?}", e);
-                            return Err(Status::InternalServerError);
-                        }
-                    }
-                }
-            };
+            let (file_reader, _) = tokio::io::split(file);
+            let file_stream = ReaderStream::new(file_reader);
 
-            let calculated_md5 = format!("\"{:x}\"", md5::compute(&content));
-            if calculated_md5 != etag {
-                // ETag mismatch, delete the cached file
-                if let Err(e) = fs::remove_file(&file_path).await {
-                    eprintln!("failed to remove outdated cached file: {}", e);
-                }
-                // Continue to fetch from S3
-            } else {
-                // ETag matches, serve the file
-                if needs_rename {
-                    // Rename the file to include the etag
-                    let new_file_path = generate_file_path(&s3key, &etag);
-                    if let Err(e) = fs::rename(&file_path, &new_file_path).await {
-                        eprintln!("failed to rename cached file with etag: {}", e);
-                        // Continue serving the file even if rename fails
-                    }
-                }
-
-                let (file_reader, _) = tokio::io::split(file);
-                let file_stream = ReaderStream::new(file_reader);
-                let content_type = determine_content_type(&file_path);
-                let size = content.len();
-
-                if cfg!(debug_assertions) {
-                    println!("served {} from cache", &s3key);
-                }
-
-                return Ok(ByteStreamResponse {
-                    size,
-                    stream: Box::pin(file_stream),
-                    content_type,
-                });
+            if cfg!(debug_assertions) {
+                println!("served {} from cache", &s3key);
             }
+
+            return Ok(ByteStreamResponse {
+                size,
+                stream: Box::pin(file_stream),
+                content_type,
+            });
         }
     }
-
-    println!("{} not cached or outdated, fetching from s3", &s3key);
 
     let bucket = if cfg!(debug_assertions) {
         env::var("TEST_S3_BUCKET_NAME").expect("TEST_S3_BUCKET_NAME must be set")
     } else {
         env::var("S3_BUCKET_NAME").expect("S3_BUCKET_NAME must be set")
     };
+
     match get_file_from_s3(&state.s3_client, &bucket, &s3key).await {
-        Ok((mut byte_stream, content_type, content_length, etag)) => {
-            let final_file_path = generate_file_path(&s3key, &etag);
-            let tmp_file_path = final_file_path.with_file_name(format!("{}.tmp", Uuid::new_v4()));
+        Ok((mut byte_stream, content_type, content_length)) => {
+            let file_path = generate_file_path(&s3key);
+            let tmp_file_path = file_path.with_file_name(format!("{}.tmp", Uuid::new_v4()));
 
             // Create a new temporary file
             let file = match fs::File::create(&tmp_file_path).await {
@@ -160,24 +116,9 @@ pub async fn index(path: PathBuf, state: &State<AppState>) -> Result<ByteStreamR
                 return Err(Status::InternalServerError);
             }
 
-            // Verify checksum
-            let file_content = fs::read(&tmp_file_path).await.map_err(|e| {
-                eprintln!("failed to read temporary file: {}", e);
-                Status::InternalServerError
-            })?;
-            let file_md5 = format!("\"{:x}\"", md5::compute(&file_content));
-
-            if file_md5 == etag {
-                // Rename the temporary file to the final file name
-                if let Err(e) = fs::rename(&tmp_file_path, &final_file_path).await {
-                    eprintln!("failed to rename temporary file: {}", e);
-                    return Err(Status::InternalServerError);
-                }
-            } else {
-                eprintln!("Checksum mismatch. Expected: {}, Got: {}", etag, file_md5);
-                if let Err(e) = fs::remove_file(&tmp_file_path).await {
-                    eprintln!("failed to remove temporary file: {}", e);
-                }
+            // Rename the temporary file to the final file name
+            if let Err(e) = fs::rename(&tmp_file_path, &file_path).await {
+                eprintln!("failed to rename temporary file: {}", e);
                 return Err(Status::InternalServerError);
             }
 
@@ -188,32 +129,14 @@ pub async fn index(path: PathBuf, state: &State<AppState>) -> Result<ByteStreamR
             Ok(ByteStreamResponse {
                 size: content_length,
                 stream: Box::pin(tokio_util::io::ReaderStream::new(
-                    tokio::fs::File::open(&final_file_path).await.unwrap(),
+                    tokio::fs::File::open(&file_path).await.unwrap(),
                 )),
                 content_type,
             })
         }
-        Err(e) => match e {
-            S3Error::RequestFailed(err_msg) => {
-                eprintln!("S3 request failed: {}", err_msg);
-                Err(Status::InternalServerError)
-            }
-            S3Error::NoContentLength => {
-                eprintln!("No content length in S3 response");
-                Err(Status::InternalServerError)
-            }
-            S3Error::NoETag => {
-                eprintln!("No ETag in S3 response");
-                Err(Status::InternalServerError)
-            }
-            S3Error::ETagMismatch => {
-                eprintln!("ETag mismatch when fetching from S3");
-                Err(Status::InternalServerError)
-            }
-            S3Error::ChunkReadError(err_msg) => {
-                eprintln!("Error reading chunk from S3: {}", err_msg);
-                Err(Status::InternalServerError)
-            }
-        },
+        Err(e) => {
+            eprintln!("failed to get file from s3: {:?}", e);
+            Err(Status::InternalServerError)
+        }
     }
 }

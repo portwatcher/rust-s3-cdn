@@ -26,23 +26,12 @@ pub async fn is_key_cached(key: &str) -> bool {
 }
 
 pub async fn get_cached_file_path(key: &str) -> Option<PathBuf> {
-    let cache_dir = env::var("CACHE_DIR").expect("CACHE_DIR must be set");
-    let dir = std::path::Path::new(&cache_dir);
-    let safe_key = key.replace("/", "_");
-
-    if let Ok(mut entries) = fs::read_dir(dir).await {
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let file_name = entry.file_name();
-            let file_name_str = file_name.to_str().unwrap();
-            if file_name_str.starts_with(&safe_key)
-                && (file_name_str == safe_key
-                    || file_name_str.starts_with(&format!("{}_", safe_key)))
-            {
-                return Some(entry.path());
-            }
-        }
+    let path = generate_file_path(key);
+    if path.exists() {
+        Some(path)
+    } else {
+        None
     }
-    None
 }
 
 pub fn determine_content_type(path: &Path) -> ContentType {
@@ -105,17 +94,10 @@ pub async fn clean_old_files(max_age: std::time::Duration) -> Result<(), std::io
     Ok(())
 }
 
-pub fn generate_file_path(key: &str, etag: &str) -> PathBuf {
+pub fn generate_file_path(key: &str) -> PathBuf {
     let safe_key = key.replace("/", "_");
     let dir = env::var("CACHE_DIR").expect("CACHE_DIR must be set");
     let mut path = PathBuf::from(dir);
-    path.push(format!("{}_{}", safe_key, etag.trim_matches('"')));
+    path.push(safe_key);
     path
-}
-
-pub fn extract_etag_from_filename(path: &Path) -> Option<String> {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .and_then(|name| name.rsplit_once('_'))
-        .map(|(_, etag)| format!("\"{}\"", etag))
 }
