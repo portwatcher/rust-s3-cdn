@@ -26,6 +26,7 @@ AWS_SECRET_ACCESS_KEY=bar
 AWS_DEFAULT_REGION=baz
 S3_BUCKET_NAME=qux
 CACHE_CAPACITY=1000
+S3_ENDPOINT=https://sgp1.digitaloceanspaces.com  # this is optinal
 ```
 
 or set these values in other config files like `docker-compose.yml`.

@@ -15,14 +15,20 @@ pub struct AppState {
 async fn main() -> Result<(), rocket::Error> {
     dotenv().ok();
 
-    let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+    let config_builder = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .stalled_stream_protection(
             StalledStreamProtectionConfig::enabled()
                 .download_enabled(false)
                 .build(),
-        )
-        .load()
-        .await;
+        );
+
+    let config_builder = if let Ok(endpoint) = std::env::var("S3_ENDPOINT") {
+        config_builder.endpoint_url(endpoint)
+    } else {
+        config_builder
+    };
+
+    let config = config_builder.load().await;
     let s3_client = Client::new(&config);
     let state = AppState { s3_client };
 
