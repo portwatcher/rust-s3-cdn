@@ -2,7 +2,7 @@ use crate::fs::{determine_content_type, generate_file_path, get_cached_file_path
 use crate::s3::{get_file_from_s3, S3Error};
 use crate::AppState;
 
-use aws_sdk_s3::{primitives::ByteStream, Client};
+use aws_sdk_s3::{error::ProvideErrorMetadata, primitives::ByteStream, Client};
 use bytes::Bytes;
 use futures::Stream;
 use rocket::{
@@ -92,6 +92,11 @@ pub async fn index(path: PathBuf, state: &State<AppState>) -> Result<ByteStreamR
         }
     };
 
+    // Early return for favicon.ico requests
+    if key == "favicon.ico" {
+        return Err(Status::NotFound);
+    }
+
     let s3key = key.replace("\\", "/");
 
     if let Some(file_path) = get_cached_file_path(&s3key).await {
@@ -180,9 +185,49 @@ pub async fn index(path: PathBuf, state: &State<AppState>) -> Result<ByteStreamR
         }
         Err(e) => {
             eprintln!(
-                "Failed to get file from S3 for key: {:?}, error: {:?}",
+                "Failed to get file from S3 for key '{}'. Detailed error: {:?}",
                 s3key, e
             );
+            match e {
+                S3Error::RequestFailed(err) => {
+                    let error_code = err.code().unwrap_or("Unknown");
+                    let error_message = err.message().unwrap_or("No error message");
+                    eprintln!("S3 request failed: {} - {}", error_code, error_message);
+
+                    match error_code {
+                        "NoSuchKey" => return Err(Status::NotFound),
+                        "NoSuchBucket" => {
+                            eprintln!("Configuration error: S3 bucket does not exist");
+                            return Err(Status::InternalServerError);
+                        }
+                        "AccessDenied" => {
+                            eprintln!("Configuration error: No permission to access S3 bucket");
+                            return Err(Status::InternalServerError);
+                        }
+                        _ => {
+                            eprintln!("S3 request failed with error: {:?}", err);
+                            return Err(Status::InternalServerError);
+                        }
+                    }
+                }
+                S3Error::ETagMismatch { computed, expected } => {
+                    eprintln!("File integrity error - ETag mismatch");
+                    eprintln!("Expected: {}, Got: {}", expected, computed);
+                }
+                S3Error::SizeMismatch { expected, actual } => {
+                    eprintln!("File integrity error - Size mismatch");
+                    eprintln!("Expected: {} bytes, Got: {} bytes", expected, actual);
+                }
+                S3Error::NoContentLength => {
+                    eprintln!("S3 response error: Missing Content-Length header");
+                }
+                S3Error::NoETag => {
+                    eprintln!("S3 response error: Missing ETag header");
+                }
+                S3Error::ChunkReadError => {
+                    eprintln!("Network error: Failed to read file data from S3");
+                }
+            }
             Err(Status::InternalServerError)
         }
     }
