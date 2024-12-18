@@ -73,6 +73,13 @@ async fn get_file_with_retry(
                 }
                 retries += 1;
             }
+            Err(S3Error::ChunkReadError) => {
+                eprintln!("Network error: Failed to read file data from S3");
+                if retries >= max_retries {
+                    return Err(S3Error::ChunkReadError);
+                }
+                retries += 1;
+            }
             Err(e) => return Err(e),
         }
     }
