@@ -29,7 +29,7 @@ CACHE_CAPACITY=1000
 S3_ENDPOINT=https://sgp1.digitaloceanspaces.com  # this is optinal
 ```
 
-or set these values in other config files like `docker-compose.yml`.
+or set these values as environment variables in other config files like `docker-compose.yml`.
 They are essential for this program to run.
 
 
@@ -48,6 +48,11 @@ HEAD /:path
 
 Check if a file is cached
 
+## Docker Image
+
+```
+docker pull juryschon/s3-cdn:latest
+```
 
 ## Todo
 

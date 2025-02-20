@@ -1,16 +1,17 @@
-FROM rust:1.83.0 AS builder
+FROM rust:1.84.1 AS builder
 
 WORKDIR /app
 COPY . .
 
+# Set RUSTFLAGS to ensure compatible CPU target
+ENV RUSTFLAGS="-C target-cpu=generic"
 RUN cargo build --release
 
 
-FROM rust:1.83.0
+FROM rust:1.84.1
 
 WORKDIR /app
 COPY --from=builder /app/target/release/s3-cdn .
-COPY --from=builder /app/.env .
 
 ENV TZ="Asia/Tokyo"
 
