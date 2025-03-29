@@ -22,6 +22,15 @@ async fn main() -> Result<(), rocket::Error> {
                 .build(),
         );
 
+    // First check for explicit region setting
+    let config_builder = if let Ok(region) = std::env::var("AWS_DEFAULT_REGION") {
+        config_builder.region(aws_sdk_s3::config::Region::new(region))
+    } else {
+        eprintln!("Warning: AWS_DEFAULT_REGION not set. S3 operations may fail.");
+        config_builder
+    };
+
+    // Then check for endpoint override
     let config_builder = if let Ok(endpoint) = std::env::var("S3_ENDPOINT") {
         config_builder.endpoint_url(endpoint)
     } else {
